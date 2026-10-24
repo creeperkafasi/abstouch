@@ -142,11 +142,53 @@ pub fn generate_config() {
         }
     };
 
+    let tap_to_click = {
+        print!("Enable tap to click? (Y/n) ");
+        std::io::stdout().flush().unwrap();
+        match {
+            let mut buffer = String::new();
+            std::io::stdin()
+            .read_line(&mut buffer)
+            .expect("Unable to read line from stdin");
+            buffer.trim().to_lowercase()
+        }
+        .as_str()
+        {
+            "" | "yes" | "y" => true,
+            "no" | "n" => false,
+            _ => {
+                eprintln!("Invalid value");
+                exit(1)
+            }
+        }
+    };
+
+    let double_tap_to_drag = if !tap_to_click { false } else {
+        print!("Enable double tap to drag? (Y/n) ");
+        std::io::stdout().flush().unwrap();
+        match {
+            let mut buffer = String::new();
+            std::io::stdin()
+            .read_line(&mut buffer)
+            .expect("Unable to read line from stdin");
+            buffer.trim().to_lowercase()
+        }
+        .as_str()
+        {
+            "" | "yes" | "y" => true,
+            "no" | "n" => false,
+            _ => {
+                eprintln!("Invalid value");
+                exit(1)
+            }
+        }
+    };
+
     let scroll_factor = { 1.0 };
 
     println!("Command to run your config is:");
     println!(
-        "{executable_name} -i {input_device} {} -s {scroll_factor} {}",
+        "{executable_name} -i {input_device} {} -s {scroll_factor}{}{}{}",
         action_map
             .iter()
             .map(|(arg, action)| {
@@ -161,6 +203,8 @@ pub fn generate_config() {
             })
             .collect::<Vec<_>>()
             .join(" "),
-        if two_finger_scroll { "" } else { "--disable-mt-scroll" }
+        if two_finger_scroll { "" } else { " --disable-mt-scroll" },
+        if tap_to_click { "" } else { " --disable-ttc" },
+        if double_tap_to_drag { "" } else { " --disable-dttd" }
     );
 }

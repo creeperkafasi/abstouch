@@ -1,6 +1,6 @@
 mod onboarding;
 
-use std::{collections::HashMap, env::args};
+use std::{collections::HashMap, env::args, time::{Duration, Instant}};
 
 use evdev::{
     AbsInfo, AbsoluteAxisCode, AttributeSet, EventType, InputEvent, KeyCode, RelativeAxisCode,
@@ -25,6 +25,8 @@ fn main() {
     let mut input_map = HashMap::new();
     let mut scroll_factor = 1.0; // Adjust scroll sensitivity
     let mut mt_scroll_enabled = true;
+    let mut ttc_enabled = true;
+    let mut dttd_enabled = true;
 
     let mut args = args().peekable();
     args.next(); // Skip executable name
@@ -69,6 +71,14 @@ fn main() {
                     .expect("Expected a float")
             }
             "--disable-mt-scroll" => mt_scroll_enabled = false,
+            "--disable-ttc" => ttc_enabled = false,
+            "--disable-dttd" => dttd_enabled = false,
+            "--on-tap" => {
+                input_map.insert(
+                    KeyCode::BTN_LEFT,
+                    parse_key_arg(args.next().expect("Expected argument"))
+                );
+            }
             _ => {
                 panic!("Unknown argument: {arg}")
             }
@@ -93,10 +103,12 @@ fn main() {
         )
     };
 
+    touchpad.set_nonblocking(true).unwrap();
+
     println!(
         "[INFO] Geometry -> X: {}-{}, Y: {}-{}",
         x_abs.minimum(),
-        x_abs.maximum(),
+             x_abs.maximum(),
         y_abs.minimum(),
         y_abs.maximum()
     );
@@ -164,132 +176,196 @@ fn main() {
     let mut last_x: Option<i32> = None;
     // let mut old_now = chrono::Local::now();
 
+    let mut press_start = Instant::now();
+
+    let mut lift_start = Instant::now();
+
+    let mut double_tap: bool = false;
+    let mut dragging: bool = false;
+
     let mut x_position = None;
     let mut y_position = None;
+
     loop {
-        let events = touchpad.fetch_events().unwrap().collect::<Vec<_>>();
-        // println!("Batch size: {:?}", events.len());
-        for event in events {
-            match event.event_type() {
-                EventType::ABSOLUTE => {
-                    let code = AbsoluteAxisCode(event.code());
-                    match code {
-                        AbsoluteAxisCode::ABS_MT_SLOT => {
-                            current_slot = event.value();
-                        }
-                        AbsoluteAxisCode::ABS_MT_TRACKING_ID => {
-                            match event.value() {
-                                -1 => {
-                                    // Finger lifted
-                                    finger_count -= 1;
-                                    if active_slot == Some(current_slot) {
-                                        active_slot = None;
-                                    }
-                                    if finger_count <= 0 {
-                                        if finger_count < 0 {
-                                            dbg!(finger_count);
+        //dbg!(finger_count);
+        //let events = touchpad.fetch_events().unwrap().collect::<Vec<_>>();
+
+        if let Ok(fetched) = touchpad.fetch_events() {
+            let events = fetched.collect::<Vec<_>>();
+
+            // println!("Batch size: {:?}", events.len());
+
+            for event in events {
+                match event.event_type() {
+                    EventType::ABSOLUTE => {
+                        let code = AbsoluteAxisCode(event.code());
+                        match code {
+                            AbsoluteAxisCode::ABS_MT_SLOT => {
+                                current_slot = event.value();
+                            }
+                            AbsoluteAxisCode::ABS_MT_TRACKING_ID => {
+                                match event.value() {
+                                    -1 => {
+                                        // Finger lifted
+                                        finger_count -= 1;
+                                        if active_slot == Some(current_slot) {
+                                            active_slot = None;
+
+                                            //println!("press duration : {:?}", press_start.elapsed());
+
+                                            if ttc_enabled {
+
+                                                lift_start = Instant::now();
+
+                                                if !dragging {
+
+                                                    if press_start.elapsed() < Duration::from_millis(200) {
+                                                        println!("click !");
+
+                                                        virtual_tablet
+                                                        .emit(&[InputEvent::new(
+                                                            EventType::ABSOLUTE.0,
+                                                            AbsoluteAxisCode::ABS_PRESSURE.0,
+                                                            2048,
+                                                        )])
+                                                        .unwrap();
+
+                                                        double_tap = true;
+                                                    }
+
+                                                } else {
+                                                    virtual_tablet
+                                                    .emit(&[InputEvent::new(
+                                                        EventType::ABSOLUTE.0,
+                                                        AbsoluteAxisCode::ABS_PRESSURE.0,
+                                                        0,
+                                                    )])
+                                                    .unwrap();
+                                                    dragging = false;
+                                                }
+                                            }
+
                                         }
-                                        finger_count = 0;
-                                        last_x = None;
-                                        last_y = None;
+                                        if finger_count <= 0 {
+                                            if finger_count < 0 {
+                                                dbg!(finger_count);
+                                            }
+                                            finger_count = 0;
+                                            last_x = None;
+                                            last_y = None;
+                                        }
                                     }
-                                }
-                                _ => {
-                                    // New finger
-                                    finger_count += 1;
-                                    if active_slot.is_none() {
-                                        active_slot = Some(current_slot);
+                                    _ => {
+                                        // New finger
+
+                                        if ttc_enabled && finger_count == 0 {
+                                            if double_tap {
+                                                dragging = true;
+                                            } else {
+                                                double_tap = false;
+                                                press_start = Instant::now();
+                                            }
+                                        }
+
+                                        finger_count += 1;
+                                        if active_slot.is_none() {
+                                            active_slot = Some(current_slot);
+                                        }
                                     }
                                 }
                             }
-                        }
-                        // Single finger - move tablet
-                        AbsoluteAxisCode::ABS_X | AbsoluteAxisCode::ABS_MT_POSITION_X
-                            if active_slot == Some(current_slot)
-                                && (finger_count < 2 || !mt_scroll_enabled) =>
-                        {
-                            x_position = Some(event.value());
-                        }
-                        // Y axis movement
-                        AbsoluteAxisCode::ABS_Y | AbsoluteAxisCode::ABS_MT_POSITION_Y
-                            if active_slot == Some(current_slot)
-                                && (finger_count < 2 || !mt_scroll_enabled) =>
-                        {
-                            y_position = Some(event.value());
-                        }
-                        // Two-finger scroll
-                        AbsoluteAxisCode::ABS_MT_POSITION_X
-                        | AbsoluteAxisCode::ABS_MT_POSITION_Y
-                            if active_slot == Some(current_slot)
-                                && finger_count >= 2
-                                && mt_scroll_enabled =>
-                        {
-                            let (last, rel_code, mult) = match code {
-                                AbsoluteAxisCode::ABS_MT_POSITION_X => {
-                                    (last_x, RelativeAxisCode::REL_HWHEEL_HI_RES, 1)
+                            // Single finger - move tablet
+                            AbsoluteAxisCode::ABS_X | AbsoluteAxisCode::ABS_MT_POSITION_X
+                                if active_slot == Some(current_slot)
+                                    && (finger_count < 2 || !mt_scroll_enabled) =>
+                            {
+                                if event.value() != 0 {
+                                    x_position = Some(event.value());
                                 }
-                                AbsoluteAxisCode::ABS_MT_POSITION_Y => {
-                                    (last_y, RelativeAxisCode::REL_WHEEL_HI_RES, -1)
+                            }
+                            // Y axis movement
+                            AbsoluteAxisCode::ABS_Y | AbsoluteAxisCode::ABS_MT_POSITION_Y
+                                if active_slot == Some(current_slot)
+                                    && (finger_count < 2 || !mt_scroll_enabled) =>
+                            {
+                                y_position = Some(event.value());
+                            }
+                            // Two-finger scroll
+                            AbsoluteAxisCode::ABS_MT_POSITION_X
+                            | AbsoluteAxisCode::ABS_MT_POSITION_Y
+                                if active_slot == Some(current_slot)
+                                    && finger_count >= 2
+                                    && mt_scroll_enabled =>
+                            {
+                                let (last, rel_code, mult) = match code {
+                                    AbsoluteAxisCode::ABS_MT_POSITION_X => {
+                                        (last_x, RelativeAxisCode::REL_HWHEEL_HI_RES, 1)
+                                    }
+                                    AbsoluteAxisCode::ABS_MT_POSITION_Y => {
+                                        (last_y, RelativeAxisCode::REL_WHEEL_HI_RES, -1)
+                                    }
+                                    _ => unreachable!(),
+                                };
+                                if let Some(l) = last {
+                                    let delta = ((event.value() - l) as f32 * scroll_factor) as i32;
+                                    if delta != 0 {
+                                        virtual_mouse
+                                            .emit(&[InputEvent::new(
+                                                EventType::RELATIVE.0,
+                                                rel_code.0,
+                                                delta * mult,
+                                            )])
+                                            .unwrap();
+                                    }
                                 }
-                                _ => unreachable!(),
-                            };
-                            if let Some(l) = last {
-                                let delta = ((event.value() - l) as f32 * scroll_factor) as i32;
-                                if delta != 0 {
-                                    virtual_mouse
+                                match code {
+                                    AbsoluteAxisCode::ABS_MT_POSITION_X => {
+                                        last_x = Some(event.value());
+                                    }
+                                    AbsoluteAxisCode::ABS_MT_POSITION_Y => {
+                                        last_y = Some(event.value());
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    EventType::KEY => {
+                        let code = KeyCode(event.code());
+                        if let Some(action) = input_map.get(&code) {
+                            match action {
+                                Action::Key(action) => {
+                                    virtual_tablet
                                         .emit(&[InputEvent::new(
-                                            EventType::RELATIVE.0,
-                                            rel_code.0,
-                                            delta * mult,
+                                            EventType::KEY.0,
+                                            action.code(),
+                                            event.value(),
+                                        )])
+                                        .unwrap();
+                                    let pressure = if event.value() == 1 { 2048 } else { 0 };
+                                    virtual_tablet
+                                        .emit(&[InputEvent::new(
+                                            EventType::ABSOLUTE.0,
+                                            AbsoluteAxisCode::ABS_PRESSURE.0,
+                                            pressure,
                                         )])
                                         .unwrap();
                                 }
-                            }
-                            match code {
-                                AbsoluteAxisCode::ABS_MT_POSITION_X => {
-                                    last_x = Some(event.value());
-                                }
-                                AbsoluteAxisCode::ABS_MT_POSITION_Y => {
-                                    last_y = Some(event.value());
-                                }
-                                _ => {}
+                                Action::Scroll => todo!("Scrolling with a button"),
+                                Action::Ignore => {}
                             }
                         }
-                        _ => {}
                     }
+                    _ => {}
                 }
-                EventType::KEY => {
-                    let code = KeyCode(event.code());
-                    if let Some(action) = input_map.get(&code) {
-                        match action {
-                            Action::Key(action) => {
-                                virtual_tablet
-                                    .emit(&[InputEvent::new(
-                                        EventType::KEY.0,
-                                        action.code(),
-                                        event.value(),
-                                    )])
-                                    .unwrap();
-                                let pressure = if event.value() == 1 { 2048 } else { 0 };
-                                virtual_tablet
-                                    .emit(&[InputEvent::new(
-                                        EventType::ABSOLUTE.0,
-                                        AbsoluteAxisCode::ABS_PRESSURE.0,
-                                        pressure,
-                                    )])
-                                    .unwrap();
-                            }
-                            Action::Scroll => todo!("Scrolling with a button"),
-                            Action::Ignore => {}
-                        }
-                    }
-                }
-                _ => {}
             }
         }
 
+        //dbg!(x_position, y_position);
+
         if let (Some(x_position_value), Some(y_position_value)) = (x_position, y_position) {
-            // println!("x: {x_position_value}, y: {y_position_value}");
+            //println!("x: {x_position_value}, y: {y_position_value}");
             virtual_tablet
                 .emit(&[InputEvent::new(
                     EventType::ABSOLUTE.0,
@@ -305,9 +381,26 @@ fn main() {
                     y_position_value,
                 )])
                 .unwrap();
-            x_position = None;
-            y_position = None;
+            //x_position = None;
+            //y_position = None;
         }
+
+        if dttd_enabled
+            && double_tap
+            && !dragging
+            && lift_start.elapsed() > Duration::from_millis(200)
+        {
+            println!("stop click!");
+            virtual_tablet
+            .emit(&[InputEvent::new(
+                EventType::ABSOLUTE.0,
+                AbsoluteAxisCode::ABS_PRESSURE.0,
+                0
+            )])
+            .unwrap();
+            double_tap = false;
+        }
+
         // Synchronize after each event batch
         virtual_tablet
             .emit(&[InputEvent::new(EventType::SYNCHRONIZATION.0, 0, 0)])
